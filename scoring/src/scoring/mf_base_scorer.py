@@ -29,30 +29,41 @@ logger = logging.getLogger("birdwatch.mf_base_scorer")
 logger.setLevel(logging.INFO)
 
 
-def coalesce_columns(df: pd.DataFrame, columnPrefix: str) -> pd.DataFrame:
-  """Condense all columns beginning with columnPrefix into a single column.
+def coalesce_columns(
+  df: pd.DataFrame, columnPrefix: str, includeBaseColumn: bool = False
+) -> pd.DataFrame:
+  """Condense columns for columnPrefix into a single column.
 
-  With each row there must be at most one column with a non-NaN value in the set of
-  columns beginning with columnPrefix.  If a non-NaN value is present that will
-  become the value in the condensed column, otherwise the value will be NaN.  After
-  column values are condensed the original (prefixed) columns will be dropped.
+  By default, condenses columns beginning with ``{columnPrefix}_`` (suffix pattern
+  used by group/topic scorers). If includeBaseColumn is True, also includes an
+  existing bare ``columnPrefix`` column (used when a main model writes the bare
+  name and a secondary model writes ``{columnPrefix}_{id}``).
+
+  With each row there must be at most one column with a non-NaN value in the set.
+  If a non-NaN value is present that will become the value in the condensed
+  column, otherwise the value will be NaN.  After column values are condensed the
+  original columns being coalesced will be dropped (and replaced by columnPrefix).
 
   Args:
     df: DataFrame containing columns to condense
-    collumnPrefix: Prefix used to detect columns to coalesce, and the name for
+    columnPrefix: Prefix used to detect columns to coalesce, and the name for
       the output column.
+    includeBaseColumn: if True, include bare columnPrefix alongside suffix columns
 
   Returns:
-    DataFrame with all columns prefixed by columnPrefix dropped and replaced by
-    a single column named columnPrefix
+    DataFrame with coalesced columns replaced by a single column named columnPrefix
 
   Raises:
-    AssertionError if multiple columns prefixed by columnPrefix have non-NaN values
-    for any row.
+    AssertionError if multiple candidate columns have non-NaN values for any row.
   """
   # Identify columns to coalesce
   columns = [col for col in df.columns if col.startswith(f"{columnPrefix}_")]
+  if includeBaseColumn and columnPrefix in df.columns:
+    columns = [columnPrefix] + columns
   if not columns:
+    return df
+  # Only base column present and no suffixes: nothing to coalesce.
+  if columns == [columnPrefix]:
     return df
   # Validate that at most one column is set, and store which rows have a column set
   rowResults = np.invert(df[columns].isna()).sum(axis=1)

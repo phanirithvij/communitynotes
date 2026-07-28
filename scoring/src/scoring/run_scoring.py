@@ -20,7 +20,11 @@ from . import constants as c, contributor_state, note_ratings, note_status_histo
 from .constants import FinalScoringArgs, ModelResult, PrescoringArgs, ScoringArgs
 from .enums import Scorers, Topics
 from .gaussian_core_with_topics_scorer import GaussianCoreWithTopicsScorer
-from .gaussian_group_scorer import GaussianGroupScorer
+from .gaussian_group_scorer import (
+  GaussianCoreGroupScorer,
+  GaussianGroupScorer,
+  coreGroupScoringGroup,
+)
 from .gaussian_scorer import GaussianScorer, compute_empirical_prior_df
 from .gaussian_topic_scorer import GaussianTopicScorer
 from .matrix_factorization.normalized_loss import NormalizedLossHyperparameters
@@ -126,7 +130,9 @@ def _get_scorers(
         seed=seed,
         saveIntermediateState=True,
         crhThreshold=0.25,
-      )
+      ),
+      # Core-group Gaussian NMR veto: group 21 ratings only; MFCoreScorer prescoring.
+      GaussianCoreGroupScorer(seed=seed, threads=4),
     ]
   scorers[Scorers.MFCoreWithTopicsScorer] = [
     MFCoreWithTopicsScorer(
@@ -962,6 +968,16 @@ def meta_score(
           c.gaussianRatingStatusKey,
           checkFirmReject=True,
           crnhCoverage=True,
+        )
+      )
+    # Core-group (21) Gaussian NMR veto: listed after GAUSSIAN_MODEL so it can
+    # demote CRH promoted by main GaussianScorer when the group-21 model disagrees.
+    if enabledScorers is None or Scorers.GaussianGroupScorer in enabledScorers:
+      rules.append(
+        scoring_rules.ApplyNMRGroupModelResult(
+          RuleID[f"GROUP_MODEL_{coreGroupScoringGroup}_NMR"],
+          {RuleID.EXPANSION_MODEL, RuleID.CORE_MODEL},
+          coreGroupScoringGroup,
         )
       )
     if enabledScorers is None or Scorers.GaussianCoreWithTopicsScorer in enabledScorers:

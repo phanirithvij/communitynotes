@@ -147,7 +147,7 @@ class GaussianScorer(Scorer):
     self,
     includedTopics: Set[str] = set(),
     excludeTopics: bool = True,
-    includedGroups: Set[int] = c.coverageGroups,  # by default this runs only for core
+    includedGroups: Set[int] = c.coreGroups,  # core includes coreGroupScoringGroup
     includeUnassigned: bool = True,
     strictInclusion: bool = False,
     captureThreshold: Optional[float] = 0.5,
@@ -163,6 +163,7 @@ class GaussianScorer(Scorer):
     crnhThresholdNoteFactorMultiplier: float = 0,
     crnhThresholdNMIntercept: float = -0.6,
     crnhThresholdUCBIntercept: float = -0.5,
+    enableRatioCrnh: bool = True,
     crhSuperThreshold: Optional[float] = None,
     crhThresholdNoHighVol: float = 0.45,
     crhThresholdNoCorrelated: float = 0.45,
@@ -175,12 +176,15 @@ class GaussianScorer(Scorer):
     tagFilterPercentile: int = 95,
     incorrectFilterThreshold: float = 2.5,
     firmRejectThreshold: Optional[float] = None,
+    # If False, FilterLargeFactor marks |factor| > threshold as FIRM_REJECT even without prior CRH.
+    largeFactorRequiresCrh: bool = True,
     minMinorityNetHelpfulRatings: Optional[int] = None,
     minMinorityNetHelpfulRatio: Optional[float] = None,
     populationSampledRatingPerNoteLossRatio: Optional[float] = 10.0,
     nPoints=50,
-    nBinsEachSide=25,
+    nBinsEachSide=26,  # 2*(nBinsEachSide-1)=50 centers, matches len(c.quantileRange)
     calculateBins=False,
+    centeredBins: bool = False,
     crhParams: c.GaussianParams = c.gaussianCrhParams,
     crnhParams: c.GaussianParams = c.gaussianCrnhParams,
     useMfNoteParams=True,
@@ -230,6 +234,7 @@ class GaussianScorer(Scorer):
     self._crnhThresholdNoteFactorMultiplier = crnhThresholdNoteFactorMultiplier
     self._crnhThresholdNMIntercept = crnhThresholdNMIntercept
     self._crnhThresholdUCBIntercept = crnhThresholdUCBIntercept
+    self._enableRatioCrnh = enableRatioCrnh
     self._crhSuperThreshold = crhSuperThreshold
     self._crhThresholdNoHighVol = crhThresholdNoHighVol
     self._crhThresholdNoCorrelated = crhThresholdNoCorrelated
@@ -241,16 +246,17 @@ class GaussianScorer(Scorer):
     self._tagFilterPercentile = tagFilterPercentile
     self._incorrectFilterThreshold = incorrectFilterThreshold
     self._firmRejectThreshold = firmRejectThreshold
+    self._largeFactorRequiresCrh = largeFactorRequiresCrh
     self._minMinorityNetHelpfulRatings = minMinorityNetHelpfulRatings
     self._minMinorityNetHelpfulRatio = minMinorityNetHelpfulRatio
     self._populationSampledRatingPerNoteLossRatio = populationSampledRatingPerNoteLossRatio
     self._nPoints = nPoints
     self._nBinsEachSide = nBinsEachSide
     self._calculateBins = calculateBins
+    self._centeredBins = centeredBins
     self._crhParams = crhParams
     self._crnhParams = crnhParams
     self._useMfNoteParams = useMfNoteParams
-    self._centeredBins = False
 
   def get_prescoring_name(self):
     return "MFCoreScorer"
@@ -1061,6 +1067,8 @@ class GaussianScorer(Scorer):
         minMinorityNetHelpfulRatio=self._minMinorityNetHelpfulRatio,
         crhThresholdNoHighVol=crhThresholdNoHighVol,
         crhThresholdNoCorrelated=crhThresholdNoCorrelated,
+        enableRatioCrnh=self._enableRatioCrnh,
+        largeFactorRequiresCrh=self._largeFactorRequiresCrh,
       )
       logger.info(f"sn cols: {scoredNotes.columns}")
 

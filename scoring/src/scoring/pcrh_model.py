@@ -23,6 +23,7 @@ Inference:
   threshold.
 """
 
+import gc
 import logging
 from typing import Dict, List, Optional, Set, Tuple
 
@@ -355,6 +356,13 @@ class PCRHModel:
 
   # ── Training ──
 
+  _AUTHOR_WINDOWS = ((14, "14d"), (90, "90d"))
+  _AUTHOR_STATUSES = (
+    (c.currentlyRatedHelpful, "crh"),
+    (c.currentlyRatedNotHelpful, "crnh"),
+    (c.needsMoreRatings, "nmr"),
+  )
+
   def _compute_author_stats(
     self,
     noteIds: pd.DataFrame,
@@ -369,7 +377,25 @@ class PCRHModel:
       refTime: DataFrame with noteIdKey and '_ref_millis' -- per-note reference
         timestamp. Other notes' labels must precede this time and fall within
         the window.
+
+    Implementation notes:
+      Avoids a cartesian author self-join (scored notes x all notes by author),
+      which OOMs when prolific authors have many historical notes. Instead, for
+      each author sorts label timestamps once and answers each query with
+      searchsorted on [ref - window, ref), then subtracts the query note's own
+      label when it falls in-window.
     """
+    authorCols = [
+      f"{_AUTHOR_PREFIX}{label}_{suffix}"
+      for _, suffix in self._AUTHOR_WINDOWS
+      for _, label in self._AUTHOR_STATUSES
+    ]
+    authorStats = noteIds[[c.noteIdKey]].drop_duplicates(subset=[c.noteIdKey]).copy()
+    for col in authorCols:
+      authorStats[col] = 0.0
+    if len(authorStats) == 0:
+      return authorStats
+
     nsh = noteStatusHistory[
       [
         c.noteIdKey,
@@ -381,43 +407,94 @@ class PCRHModel:
     noteAuthors = nsh[[c.noteIdKey, c.noteAuthorParticipantIdKey]].drop_duplicates(
       subset=[c.noteIdKey]
     )
-    scored = noteIds[[c.noteIdKey]].merge(noteAuthors, on=c.noteIdKey, how="left")
-    scored = scored.merge(refTime, on=c.noteIdKey, how="left")
-    otherNotes = nsh.rename(
+    queries = authorStats[[c.noteIdKey]].merge(noteAuthors, on=c.noteIdKey, how="left")
+    queries = queries.merge(refTime, on=c.noteIdKey, how="left")
+    ownLabels = nsh[
+      [c.noteIdKey, c.currentLabelKey, c.timestampMillisOfNoteCurrentLabelKey]
+    ].drop_duplicates(subset=[c.noteIdKey])
+    ownLabels = ownLabels.rename(
       columns={
-        c.noteIdKey: "other_noteId",
-        c.currentLabelKey: "other_currentLabel",
-        c.timestampMillisOfNoteCurrentLabelKey: "other_labelMillis",
+        c.currentLabelKey: "_own_label",
+        c.timestampMillisOfNoteCurrentLabelKey: "_own_millis",
       }
     )
-    merged = scored.merge(otherNotes, on=c.noteAuthorParticipantIdKey, how="inner")
-    merged = merged[
-      (merged[c.noteIdKey] != merged["other_noteId"])
-      & merged["other_labelMillis"].notna()
-      & (merged["other_labelMillis"] < merged["_ref_millis"])
+    queries = queries.merge(ownLabels, on=c.noteIdKey, how="left")
+
+    hist = nsh.loc[
+      nsh[c.timestampMillisOfNoteCurrentLabelKey].notna(),
+      [
+        c.noteIdKey,
+        c.noteAuthorParticipantIdKey,
+        c.currentLabelKey,
+        c.timestampMillisOfNoteCurrentLabelKey,
+      ],
     ]
-    results = []
-    for windowDays, suffix in [(14, "14d"), (90, "90d")]:
-      windowMillis = windowDays * 24 * 60 * 60 * 1000
-      windowed = merged[merged["_ref_millis"] - merged["other_labelMillis"] <= windowMillis]
-      for status, label in [
-        (c.currentlyRatedHelpful, "crh"),
-        (c.currentlyRatedNotHelpful, "crnh"),
-        (c.needsMoreRatings, "nmr"),
-      ]:
-        colName = f"{_AUTHOR_PREFIX}{label}_{suffix}"
-        counts = (
-          windowed[windowed["other_currentLabel"] == status]
-          .groupby(c.noteIdKey)
-          .size()
-          .reset_index(name=colName)
+    if len(hist) == 0:
+      return authorStats
+
+    # noteId -> row position in authorStats for vectorized writes
+    posByNoteId = pd.Series(np.arange(len(authorStats)), index=authorStats[c.noteIdKey].to_numpy())
+    out = {col: authorStats[col].to_numpy(copy=True) for col in authorCols}
+
+    queriesByAuthor = {
+      author: grp
+      for author, grp in queries.groupby(c.noteAuthorParticipantIdKey, sort=False)
+      if pd.notna(author)
+    }
+    for author, hgrp in hist.groupby(c.noteAuthorParticipantIdKey, sort=False):
+      qgrp = queriesByAuthor.get(author)
+      if qgrp is None or len(qgrp) == 0:
+        continue
+
+      times = hgrp[c.timestampMillisOfNoteCurrentLabelKey].to_numpy(dtype=np.float64)
+      labels = hgrp[c.currentLabelKey].to_numpy()
+      order = np.argsort(times, kind="mergesort")
+      times = times[order]
+      labels = labels[order]
+
+      prefixes = {}
+      for status, label in self._AUTHOR_STATUSES:
+        isStatus = (labels == status).astype(np.int64, copy=False)
+        prefixes[label] = np.concatenate([[0], np.cumsum(isStatus)])
+
+      qNoteIds = qgrp[c.noteIdKey].to_numpy()
+      refs = qgrp["_ref_millis"].to_numpy(dtype=np.float64)
+      ownMillis = qgrp["_own_millis"].to_numpy(dtype=np.float64)
+      ownLabel = qgrp["_own_label"].to_numpy()
+      # Skip queries with missing ref time (matches old join filters).
+      validRef = np.isfinite(refs)
+      if not validRef.any():
+        continue
+      qNoteIds = qNoteIds[validRef]
+      refs = refs[validRef]
+      ownMillis = ownMillis[validRef]
+      ownLabel = ownLabel[validRef]
+      positions = posByNoteId.reindex(qNoteIds).to_numpy()
+      validPos = np.isfinite(positions)
+      if not validPos.any():
+        continue
+      positions = positions[validPos].astype(np.int64)
+      qNoteIds = qNoteIds[validPos]
+      refs = refs[validPos]
+      ownMillis = ownMillis[validPos]
+      ownLabel = ownLabel[validPos]
+
+      for windowDays, suffix in self._AUTHOR_WINDOWS:
+        windowMillis = windowDays * 24 * 60 * 60 * 1000
+        left = np.searchsorted(times, refs - windowMillis, side="left")
+        right = np.searchsorted(times, refs, side="left")
+        ownInWindow = (
+          np.isfinite(ownMillis) & (ownMillis < refs) & ((refs - ownMillis) <= windowMillis)
         )
-        results.append(counts)
-    authorStats = noteIds[[c.noteIdKey]].copy()
-    for countsDf in results:
-      authorStats = authorStats.merge(countsDf, on=c.noteIdKey, how="left")
-    authorCols = [col for col in authorStats.columns if col.startswith(_AUTHOR_PREFIX)]
-    authorStats[authorCols] = authorStats[authorCols].fillna(0)
+        for status, label in self._AUTHOR_STATUSES:
+          col = f"{_AUTHOR_PREFIX}{label}_{suffix}"
+          counts = prefixes[label][right] - prefixes[label][left]
+          selfHit = ownInWindow & (ownLabel == status)
+          counts = counts - selfHit.astype(np.int64, copy=False)
+          out[col][positions] = counts
+
+    for col in authorCols:
+      authorStats[col] = out[col]
     return authorStats
 
   def _compute_author_stats_at_n(
@@ -429,30 +506,61 @@ class PCRHModel:
     refTime = nthRatingMillis.rename(columns={"nth_rating_createdAtMillis": "_ref_millis"})
     return self._compute_author_stats(noteIds, noteStatusHistory, refTime)
 
+  def _truncate_ratings_for_cascade_training(self, ratings: pd.DataFrame) -> pd.DataFrame:
+    """Keep only ratings needed to build cascade features for all N <= max(cascade_ns).
+
+    firstNAll for N uses rank <= N. firstNScored uses createdAtMillis <= time(rank N),
+    which can include extra rows that share that timestamp. Ranks > max_n only affect
+    those filters when they share the max_n-th rating's timestamp, so we keep:
+      rank <= max_n  OR  createdAtMillis <= time(rank == max_n)
+    for notes that have at least max_n ratings (notes with fewer keep all ratings).
+
+    This is behavior-identical to keeping all ratings for every cascade N, while
+    dropping the long tail of ratings beyond the cascade horizon.
+    """
+    maxN = max(self._cascadeNs)
+    r = ratings.sort_values([c.noteIdKey, c.createdAtMillisKey], kind="mergesort")
+    r["_global_rank"] = r.groupby(c.noteIdKey, sort=False).cumcount() + 1
+    boundary = r.loc[r["_global_rank"] == maxN, [c.noteIdKey, c.createdAtMillisKey]].rename(
+      columns={c.createdAtMillisKey: "_boundary_millis"}
+    )
+    r = r.merge(boundary, on=c.noteIdKey, how="left")
+    keep = r["_global_rank"].le(maxN) | (
+      r["_boundary_millis"].notna() & r[c.createdAtMillisKey].le(r["_boundary_millis"])
+    )
+    before = len(r)
+    r = r.loc[keep].drop(columns=["_boundary_millis"])
+    logger.info(
+      f"PCRH rating truncate (max_n={maxN}): {before:,} -> {len(r):,} ratings "
+      f"(keeps rank<=max_n plus timestamp ties at boundary)"
+    )
+    return r
+
   def _get_first_n_ratings(
     self, ratings: pd.DataFrame, scoredRaterIds: Set, n: int
   ) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """Return (firstNAll, firstNScored, timingDf).
 
     firstNAll: the first N ratings by createdAtMillis for each note.
-    firstNScored: the subset of firstNAll from scored raters (len <= N).
+    firstNScored: scored-rater ratings with createdAtMillis <= Nth rating time
+      (may exceed N rows when timestamps tie).
     timingDf: noteId -> nth_rating_createdAtMillis (timestamp of the Nth rating).
     """
     if "_global_rank" in ratings.columns:
       r = ratings
       rankCol = "_global_rank"
     else:
-      r = ratings.sort_values([c.noteIdKey, c.createdAtMillisKey])
-      r["_rank"] = r.groupby(c.noteIdKey).cumcount() + 1
+      r = ratings.sort_values([c.noteIdKey, c.createdAtMillisKey], kind="mergesort")
+      r["_rank"] = r.groupby(c.noteIdKey, sort=False).cumcount() + 1
       rankCol = "_rank"
-    noteCounts = r.groupby(c.noteIdKey).size()
+    noteCounts = r.groupby(c.noteIdKey, sort=False).size()
     notesWithEnough = noteCounts[noteCounts >= n].index
     r = r[r[c.noteIdKey].isin(notesWithEnough)]
     firstNAll = r[r[rankCol] <= n]
     if rankCol == "_rank":
       firstNAll = firstNAll.drop(columns=["_rank"])
     nthTimestamp = (
-      firstNAll.groupby(c.noteIdKey)[c.createdAtMillisKey]
+      firstNAll.groupby(c.noteIdKey, sort=False)[c.createdAtMillisKey]
       .max()
       .reset_index()
       .rename(columns={c.createdAtMillisKey: "nth_millis"})
@@ -489,6 +597,7 @@ class PCRHModel:
     featsAll = self._compute_rating_features(firstNAll, raterFactorLookup, _ALL_PREFIX)
     featsScored = self._compute_rating_features(firstNScored, raterFactorLookup, _SCORED_PREFIX)
     feats = featsAll.merge(featsScored, on=c.noteIdKey, how="outer")
+    del featsAll, featsScored
     if noteTopics is not None and topicFactorLookups:
       topicFeatsAll = self._compute_topic_rating_features(
         firstNAll, noteTopics, topicFactorLookups, _TOPIC_ALL_PREFIX
@@ -500,8 +609,11 @@ class PCRHModel:
         feats = feats.merge(topicFeatsAll, on=c.noteIdKey, how="left")
       if c.noteIdKey in topicFeatsScored.columns:
         feats = feats.merge(topicFeatsScored, on=c.noteIdKey, how="left")
+      del topicFeatsAll, topicFeatsScored
     authorStats = self._compute_author_stats_at_n(feats[[c.noteIdKey]], noteStatusHistory, timingDf)
     feats = feats.merge(authorStats, on=c.noteIdKey, how="left")
+    del authorStats
+    del firstNAll, firstNScored
     feats = feats.merge(labelDf[[c.noteIdKey, "is_crh"]], on=c.noteIdKey, how="inner")
     feats["N"] = nVal
     if excludeAlreadyDecided:
@@ -509,6 +621,7 @@ class PCRHModel:
         [c.noteIdKey, c.timestampMillisOfNoteFirstNonNMRLabelKey, c.firstNonNMRLabelKey]
       ].drop_duplicates(subset=[c.noteIdKey])
       featsWithTiming = feats.merge(nshTiming, on=c.noteIdKey, how="left")
+      del nshTiming
       featsWithTiming = featsWithTiming.merge(timingDf, on=c.noteIdKey, how="left")
       alreadyDecided = (
         (featsWithTiming[c.firstNonNMRLabelKey] == c.currentlyRatedHelpful)
@@ -518,10 +631,12 @@ class PCRHModel:
           < featsWithTiming["nth_rating_createdAtMillis"]
         )
       )
-      nExcluded = alreadyDecided.sum()
+      nExcluded = int(alreadyDecided.sum())
       if nExcluded > 0:
         logger.info(f"PCRH N={nVal}: excluding {nExcluded:,} notes already CRH before Nth rating")
-      feats = feats[~alreadyDecided.values]
+      feats = feats.loc[~alreadyDecided.to_numpy()].copy()
+      del featsWithTiming, alreadyDecided
+    del timingDf
     if len(feats) < 50:
       logger.info(f"PCRH skip N={nVal}: only {len(feats)} notes")
       return None
@@ -538,7 +653,7 @@ class PCRHModel:
   ) -> None:
     ratings = self._filter_ratings_by_group(ratings, userEnrollment)
     keepCols, _ = _ratings_keep_cols(ratings)
-    ratings = ratings[keepCols].copy()
+    ratings = ratings.loc[:, [col for col in keepCols if col in ratings.columns]].copy()
     ratings[c.raterParticipantIdKey] = ratings[c.raterParticipantIdKey].astype(str)
     raterFactorLookup, scoredRaterIds = self._get_rater_factor_lookup(prescoringRaterModelOutput)
     topicFactorLookups = self._build_topic_factor_lookups(prescoringRaterModelOutput)
@@ -546,17 +661,23 @@ class PCRHModel:
       logger.info(f"PCRH topic factor lookups: {sorted(topicFactorLookups.keys())}")
     labelDf = noteStatusHistory[[c.noteIdKey, c.currentLabelKey]].copy()
     labelDf["is_crh"] = (labelDf[c.currentLabelKey] == c.currentlyRatedHelpful).astype(int)
-    recentNotes = notes[notes[c.createdAtMillisKey] > self._trainingCutoffMillis]
-    recentNoteIds = set(recentNotes[c.noteIdKey])
-    recentRatings = ratings[ratings[c.noteIdKey].isin(recentNoteIds)]
-    logger.info(f"PCRH training: {len(recentNotes):,} notes, {len(recentRatings):,} ratings")
-    recentRatings = recentRatings.sort_values([c.noteIdKey, c.createdAtMillisKey])
-    recentRatings["_global_rank"] = recentRatings.groupby(c.noteIdKey).cumcount() + 1
+    labelDf = labelDf[[c.noteIdKey, "is_crh"]]
+    recentNoteMask = notes[c.createdAtMillisKey] > self._trainingCutoffMillis
+    recentNoteIds = notes.loc[recentNoteMask, c.noteIdKey]
+    nRecentNotes = int(recentNoteMask.sum())
+    recentRatings = ratings[ratings[c.noteIdKey].isin(set(recentNoteIds.to_numpy()))]
+    del ratings, recentNoteIds, recentNoteMask
+    gc.collect()
+    logger.info(
+      f"PCRH training: {nRecentNotes:,} notes, {len(recentRatings):,} ratings (pre-truncate)"
+    )
+    recentRatings = self._truncate_ratings_for_cascade_training(recentRatings)
+    gc.collect()
     datasets = []
     for nVal in self._cascadeNs:
       df = self._build_training_dataset_at_n(
         nVal,
-        recentNotes,
+        notes,
         recentRatings,
         noteStatusHistory,
         raterFactorLookup,
@@ -569,18 +690,29 @@ class PCRHModel:
       if df is not None:
         datasets.append(df)
         logger.info(f"PCRH N={nVal}: {len(df):,} notes, CRH={df['is_crh'].sum():,}")
+      gc.collect()
+    del recentRatings, labelDf, raterFactorLookup, scoredRaterIds, topicFactorLookups
+    gc.collect()
     if not datasets:
       logger.warning("PCRH: no training data available")
       return
     pooled = pd.concat(datasets, ignore_index=True)
+    del datasets
+    gc.collect()
     dropCols = {c.noteIdKey, "is_crh"}
     self._featureCols = [
       col for col in pooled.columns if col not in dropCols and pooled[col].dtype != object
     ]
-    X = pooled[self._featureCols].fillna(0).values
-    y = pooled["is_crh"].values
+    X = pooled[self._featureCols].fillna(0).to_numpy(dtype=np.float64, copy=True)
+    y = pooled["is_crh"].to_numpy(copy=True)
+    nPooled = len(pooled)
+    crhRate = float(y.mean()) if nPooled else 0.0
+    del pooled
+    gc.collect()
     self._scaler = StandardScaler()
     xScaled = self._scaler.fit_transform(X)
+    del X
+    gc.collect()
     self._model = HistGradientBoostingClassifier(
       max_iter=self._nEstimators,
       max_depth=self._maxDepth,
@@ -591,9 +723,11 @@ class PCRHModel:
       validation_fraction=0.1,
     )
     self._model.fit(xScaled, y)
+    del xScaled, y
+    gc.collect()
     logger.info(
-      f"PCRH model trained: {len(pooled):,} rows, {len(self._featureCols)} features, "
-      f"CRH rate={y.mean():.3f}"
+      f"PCRH model trained: {nPooled:,} rows, {len(self._featureCols)} features, "
+      f"CRH rate={crhRate:.3f}"
     )
 
   # ── Inference ──
