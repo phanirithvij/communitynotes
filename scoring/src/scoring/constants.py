@@ -86,7 +86,7 @@ pcrhRevokeNKey = "pcrhRevokeN"
 pcrhFinalPredKey = "pcrhFinalPred"
 pcrhPerNThresholds = {8: 0.77, 10: 0.78, 15: 0.76, 20: 0.74, 30: 0.70, 50: 0.67}
 pcrhRevokeThreshold = 0.5
-pcrhTrainingCutoffMillis = 1741564800000  # March 10, 2026 00:00:00 UTC
+pcrhTrainingCutoffMillis = 1773100800000  # March 10, 2026 00:00:00 UTC
 authorTopNotHelpfulTagValues = "authorTopNotHelpfulTagValues"
 modelingPopulationKey = "modelingPopulation"
 modelingGroupKey = "modelingGroup"
@@ -101,7 +101,6 @@ coreGroups: Set[int] = {1, 2, 3, 6, 8, 9, 10, 11, 13, 14, 19, 21, 25}
 coverageGroups: Set[int] = {1, 2, 3, 6, 8, 9, 10, 11, 13, 14, 19, 25}
 expansionGroups: Set[int] = {0, 4, 5, 7, 12, 15, 16, 20, 22, 23, 24, 26, 27, 28, 29, 33}
 expansionPlusGroups: Set[int] = {17, 18, 30, 31, 32}
-
 # Bins for Gaussian Scorer
 quantileRange = np.array(
   [

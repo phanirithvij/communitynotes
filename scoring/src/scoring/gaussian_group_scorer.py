@@ -6,6 +6,11 @@ from .gaussian_scorer import GaussianScorer
 import pandas as pd
 
 
+# Modeling group scored by GaussianCoreGroupScorer (also in c.coreGroups).
+# Applied via ApplyNMRGroupModelResult to demote CRH/NYH when this model disagrees.
+coreGroupScoringGroup = 21
+
+
 class GaussianGroupScorer(GaussianScorer):
   def __init__(
     self,
@@ -21,16 +26,21 @@ class GaussianGroupScorer(GaussianScorer):
     crnhThresholdNoteFactorMultiplier: float = -0.8,
     crnhThresholdNMIntercept: float = -0.15,
     crnhThresholdUCBIntercept: float = -0.5,
+    enableRatioCrnh: bool = True,
     crhSuperThreshold: Optional[float] = None,
     crhThresholdNoHighVol: float = 0.37,
     crhThresholdNoCorrelated: float = 0.37,
     lowDiligenceThreshold: float = 0.263,
     factorThreshold: float = 0.5,
+    firmRejectThreshold: Optional[float] = None,
+    largeFactorRequiresCrh: bool = True,
     tagFilterPercentile: int = 95,
     incorrectFilterThreshold: float = 2.5,
     threads: int = 4,
     crhParams: c.GaussianParams = c.gaussianCrhParams,
     crnhParams: c.GaussianParams = c.gaussianCrnhParams,
+    calculateBins: bool = False,
+    centeredBins: bool = False,
   ) -> None:
     """Configure GaussianGroupScorer object.
 
@@ -55,15 +65,20 @@ class GaussianGroupScorer(GaussianScorer):
       crnhThresholdNoteFactorMultiplier=crnhThresholdNoteFactorMultiplier,
       crnhThresholdNMIntercept=crnhThresholdNMIntercept,
       crnhThresholdUCBIntercept=crnhThresholdUCBIntercept,
+      enableRatioCrnh=enableRatioCrnh,
       crhSuperThreshold=crhSuperThreshold,
       crhThresholdNoHighVol=crhThresholdNoHighVol,
       crhThresholdNoCorrelated=crhThresholdNoCorrelated,
       lowDiligenceThreshold=lowDiligenceThreshold,
       factorThreshold=factorThreshold,
+      firmRejectThreshold=firmRejectThreshold,
+      largeFactorRequiresCrh=largeFactorRequiresCrh,
       tagFilterPercentile=tagFilterPercentile,
       incorrectFilterThreshold=incorrectFilterThreshold,
       crhParams=crhParams,
       crnhParams=crnhParams,
+      calculateBins=calculateBins,
+      centeredBins=centeredBins,
       # Override GaussianScorer default (True). MFGroupScorer does not exclude topics.
       excludeTopics=False,
     )
@@ -155,3 +170,43 @@ class GaussianGroupScorer(GaussianScorer):
     userScores = userScores.drop(columns=c.modelingGroupKey)
     noteScores[self._modelingGroupKey] = self._groupId
     return noteScores, userScores
+
+
+class GaussianCoreGroupScorer(GaussianGroupScorer):
+  """Gaussian group scorer for coreGroupScoringGroup (21).
+
+  Uses MFCoreScorer prescoring (group 21 is in coreGroups; there is no dedicated MF
+  group model). Writes standard group* columns that coalesce with other group models
+  and is applied via ApplyNMRGroupModelResult.
+
+  Large-factor notes (|factor| > factorThreshold) are FIRM_REJECT even without prior CRH,
+  so ApplyNMRGroupModelResult can demote final CRH when this model disagrees.
+  """
+
+  def __init__(
+    self,
+    seed: Optional[int] = None,
+    threads: int = 4,
+    saveIntermediateState: bool = False,
+    groupThreshold: float = 0.75,
+    crhThreshold: float = 0.6,
+    factorThreshold: float = 0.5,
+    crhSuperThreshold: Optional[float] = None,
+  ) -> None:
+    super().__init__(
+      includedGroups={coreGroupScoringGroup},
+      groupId=coreGroupScoringGroup,
+      groupThreshold=groupThreshold,
+      seed=seed,
+      threads=threads,
+      saveIntermediateState=saveIntermediateState,
+      crhThreshold=crhThreshold,
+      factorThreshold=factorThreshold,
+      # FR large-factor notes even if they never hit CRH in this scorer (not CRH-only).
+      largeFactorRequiresCrh=False,
+      crhSuperThreshold=crhSuperThreshold,
+    )
+
+  def get_prescoring_name(self):
+    # These raters are scored in MF core prescoring; no dedicated group MF model.
+    return "MFCoreScorer"

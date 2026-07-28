@@ -592,6 +592,9 @@ def compute_scored_notes(
   minMinorityNetHelpfulRatio: Optional[float] = None,
   crhThresholdNoHighVol: Optional[float] = None,
   crhThresholdNoCorrelated: Optional[float] = None,
+  enableRatioCrnh: bool = True,
+  # If False, FilterLargeFactor applies to all non-CRNH notes (not only CRH).
+  largeFactorRequiresCrh: bool = True,
 ) -> pd.DataFrame:
   """
   Merges note status history, ratings, and model output. It annotes the data frame with
@@ -722,7 +725,9 @@ def compute_scored_notes(
       RuleID.RATIO_CRNH,
       {RuleID.INITIAL_NMR},
       c.currentlyRatedNotHelpful,
-      lambda noteStats: is_crnh_ratio_function(noteStats, minRatingsNeeded, do=finalRound),
+      lambda noteStats: is_crnh_ratio_function(
+        noteStats, minRatingsNeeded, do=finalRound and enableRatioCrnh
+      ),
       onlyApplyToNotesThatSayTweetIsMisleading=False,
     ),
     scoring_rules.NMtoCRNH(
@@ -818,8 +823,15 @@ def compute_scored_notes(
         scoring_rules.FilterLargeFactor(
           RuleID.LARGE_FACTOR,
           {RuleID.LOW_DILIGENCE},
-          c.firmReject if firmRejectThreshold is not None else c.needsMoreRatings,
+          # FIRM_REJECT when firmRejectThreshold is set, or when large-factor applies
+          # without requiring prior CRH (e.g. GaussianCoreGroupScorer).
+          (
+            c.firmReject
+            if (firmRejectThreshold is not None or not largeFactorRequiresCrh)
+            else c.needsMoreRatings
+          ),
           factorThreshold=factorThreshold,
+          requireCrh=largeFactorRequiresCrh,
         ),
       ]
     )

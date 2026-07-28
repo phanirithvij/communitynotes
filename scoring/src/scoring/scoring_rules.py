@@ -69,6 +69,7 @@ class RuleID(Enum):
   GROUP_MODEL_15_NMR = RuleAndVersion("GroupModel15NMR", "1.1", True)
   GROUP_MODEL_18 = RuleAndVersion("GroupModel18", "1.1", True)
   GROUP_MODEL_18_NMR = RuleAndVersion("GroupModel18NMR", "1.1", True)
+  GROUP_MODEL_21_NMR = RuleAndVersion("GroupModel21NMR", "1.1", True)
   GROUP_MODEL_33 = RuleAndVersion("GroupModel33", "1.1", True)
   GROUP_MODEL_33_NMR = RuleAndVersion("GroupModel33NMR", "1.1", True)
   TOPIC_MODEL_1 = RuleAndVersion("TopicModel01", "1.0", False)
@@ -440,29 +441,42 @@ class FilterLargeFactor(ScoringRule):
     dependencies: Set[RuleID],
     status: str,
     factorThreshold: float,
+    requireCrh: bool = True,
   ):
-    """Filter CRH notes which have especially large factors (whether positive or negative).
+    """Filter notes which have especially large factors (whether positive or negative).
+
+    By default (requireCrh=True), only notes currently on track for CRH are eligible
+    (master / Core behavior). If requireCrh=False, applies to all notes except CRNH
+    so large-factor notes get status even without prior CRH (used by GaussianCoreGroupScorer).
 
     Args:
       rule: enum corresponding to a namedtuple defining a rule name and version string for the ScoringRule.
       dependencies: Rules which must run before this rule can run.
-      status: the status which each note should be set to (e.g. CRH, CRNH, NMR)
+      status: the status which each note should be set to (e.g. CRH, CRNH, NMR, FIRM_REJECT)
       factorThreshold: threshold for filtering large factors
+      requireCrh: if True, only act on currently CRH notes; if False, all except CRNH
     """
     super().__init__(ruleID, dependencies)
     self._status = status
     self._factorThreshold = factorThreshold
+    self._requireCrh = requireCrh
 
   def score_notes(
     self, noteStats: pd.DataFrame, currentLabels: pd.DataFrame, statusColumn: str
   ) -> Tuple[pd.DataFrame, pd.DataFrame]:
-    """Returns notes on track for CRH with a high low diligence intercept."""
-    # Prune noteStats to exclude CRNH notes.  CRNH will have stronger downstream effects, so
-    # we don't want to over-write that status.
-    candidateNotes = currentLabels[currentLabels[statusColumn] == c.currentlyRatedHelpful][
-      [c.noteIdKey]
-    ]
-    noteStats = noteStats.merge(candidateNotes, on=c.noteIdKey, how="inner")
+    """Returns notes with |factor| above threshold (optionally restricted to CRH)."""
+    if len(currentLabels) > 0 and statusColumn in currentLabels.columns:
+      if self._requireCrh:
+        # Master / Core: only demote notes that already achieved CRH in this scorer.
+        candidateNotes = currentLabels[currentLabels[statusColumn] == c.currentlyRatedHelpful][
+          [c.noteIdKey]
+        ]
+      else:
+        # Do not overwrite CRNH; apply to NMR, CRH, NYH, FR, etc.
+        candidateNotes = currentLabels[currentLabels[statusColumn] != c.currentlyRatedNotHelpful][
+          [c.noteIdKey]
+        ]
+      noteStats = noteStats.merge(candidateNotes, on=c.noteIdKey, how="inner")
 
     # Identify impacted notes.
     noteStatusUpdates = noteStats.loc[
@@ -1222,9 +1236,10 @@ class ApplyNMRGroupModelResult(ScoringRule):
     """Set NMR status based on a modeling group result.
 
     This rule sets NMR note status based on group models subject to several criteria:
-      * The note must have NMR status from the group model.
-      * The note must currently be scored as CRH.  This criteria guarantees that (1) this group
-        model strictly reduces coverage
+      * The note must have NMR, CRNH, or FIRM_REJECT status from the group model.
+        FIRM_REJECT (e.g. from FilterLargeFactor) is treated like NMR for demotion.
+      * The note must currently be scored as CRH or NYH. This guarantees that this group
+        model strictly reduces coverage.
 
     Args:
       ruleID: enum corresponding to a namedtuple defining a rule name and version string for the ScoringRule.
@@ -1237,10 +1252,14 @@ class ApplyNMRGroupModelResult(ScoringRule):
   def score_notes(
     self, noteStats: pd.DataFrame, currentLabels: pd.DataFrame, statusColumn: str
   ) -> Tuple[pd.DataFrame, Optional[pd.DataFrame]]:
-    """Flip notes from CRH to NMR based on group models."""
-    # Generate the set of note status updates
+    """Flip notes from CRH/NYH to NMR based on group models."""
+    # Generate the set of note status updates. FIRM_REJECT demotes the same as NMR/CRNH.
     probationaryNMRNotes = noteStats[
-      (noteStats[c.groupRatingStatusKey].isin({c.needsMoreRatings, c.currentlyRatedNotHelpful}))
+      (
+        noteStats[c.groupRatingStatusKey].isin(
+          {c.needsMoreRatings, c.currentlyRatedNotHelpful, c.firmReject}
+        )
+      )
       & (noteStats[c.modelingGroupKey] == self._groupNumber)
     ][[c.noteIdKey]]
     # Identify notes which are currently CRH or NYH.
