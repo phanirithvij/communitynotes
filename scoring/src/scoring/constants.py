@@ -391,6 +391,17 @@ gaussianCoreWithTopicsNoteInterceptNoCorrelatedKey = (
 gaussianCoreWithTopicsNoteInterceptPopulationSampledKey = (
   "gaussianCoreWithTopicsNoteInterceptPopulationSampled"
 )
+# Gaussian Expansion Model (coverage model after MFExpansionScorer)
+gaussianExpansionNoteInterceptKey = "gaussianExpansionNoteIntercept"
+gaussianExpansionNoteFactor1Key = "gaussianExpansionNoteFactor1"
+gaussianExpansionRatingStatusKey = "gaussianExpansionRatingStatus"
+gaussianExpansionActiveRulesKey = "gaussianExpansionActiveRules"
+gaussianExpansionNumFinalRoundRatingsKey = "gaussianExpansionNumFinalRoundRatings"
+gaussianExpansionNoteInterceptNoHighVolKey = "gaussianExpansionNoteInterceptNoHighVol"
+gaussianExpansionNoteInterceptNoCorrelatedKey = "gaussianExpansionNoteInterceptNoCorrelated"
+gaussianExpansionNoteInterceptPopulationSampledKey = (
+  "gaussianExpansionNoteInterceptPopulationSampled"
+)
 # Harassment/Abuse Tag
 harassmentNoteInterceptKey = "harassmentNoteIntercept"
 harassmentNoteFactor1Key = "harassmentNoteFactor1"
@@ -1031,6 +1042,16 @@ noteModelOutputTSVColumnsAndTypes = [
   (gaussianCoreWithTopicsNumFinalRoundRatingsKey, np.double),  # double because nullable.
   (pcrhAboveThresholdTimeKey, np.double),
   (pflipProbaKey, np.double),  # double because nullable.
+  # Appended after fixed Scala indices for pcrh/pflip (97-98) so existing TSV
+  # layout is preserved. See BirdwatchTsvSchema.scala NoteModelOutput.fromStrings.
+  (gaussianExpansionNoteInterceptKey, np.double),
+  (gaussianExpansionNoteFactor1Key, np.double),
+  (gaussianExpansionRatingStatusKey, "category"),
+  (gaussianExpansionActiveRulesKey, "category"),
+  (gaussianExpansionNoteInterceptNoHighVolKey, np.double),
+  (gaussianExpansionNoteInterceptNoCorrelatedKey, np.double),
+  (gaussianExpansionNoteInterceptPopulationSampledKey, np.double),
+  (gaussianExpansionNumFinalRoundRatingsKey, np.double),  # double because nullable.
 ]
 noteModelOutputTSVColumns = [col for (col, dtype) in noteModelOutputTSVColumnsAndTypes]
 noteModelOutputTSVTypeMapping = {col: dtype for (col, dtype) in noteModelOutputTSVColumnsAndTypes}

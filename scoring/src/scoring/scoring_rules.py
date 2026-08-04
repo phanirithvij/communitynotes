@@ -83,6 +83,7 @@ class RuleID(Enum):
   NMR_DUE_TO_MIN_STABLE_CRH_TIME = RuleAndVersion("NmrDueToMinStableCrhTime", "1.0", False)
   GAUSSIAN_MODEL = RuleAndVersion("GaussianModel", "1.0", True)
   GAUSSIAN_CORE_WITH_TOPICS_MODEL = RuleAndVersion("GaussianCoreWithTopicsModel", "1.0", True)
+  GAUSSIAN_EXPANSION_MODEL = RuleAndVersion("GaussianExpansionModel", "1.0", True)
 
   def get_name(self) -> str:
     """Returns a string combining the name and version to uniquely name the logic of the ScoringRule."""

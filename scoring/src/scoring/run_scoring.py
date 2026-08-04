@@ -20,6 +20,7 @@ from . import constants as c, contributor_state, note_ratings, note_status_histo
 from .constants import FinalScoringArgs, ModelResult, PrescoringArgs, ScoringArgs
 from .enums import Scorers, Topics
 from .gaussian_core_with_topics_scorer import GaussianCoreWithTopicsScorer
+from .gaussian_expansion_scorer import GaussianExpansionScorer
 from .gaussian_group_scorer import (
   GaussianCoreGroupScorer,
   GaussianGroupScorer,
@@ -122,6 +123,7 @@ def _get_scorers(
     scorers[Scorers.GaussianCoreWithTopicsScorer] = [
       GaussianCoreWithTopicsScorer(seed=seed, threads=12)
     ]
+    scorers[Scorers.GaussianExpansionScorer] = [GaussianExpansionScorer(seed=seed, threads=12)]
     scorers[Scorers.GaussianGroupScorer] = [
       GaussianGroupScorer(
         includedGroups={nmrGaussGroupScoringGroup},
@@ -854,6 +856,19 @@ def meta_score(
           RuleID.EXPANSION_MODEL,
           {RuleID.META_INITIAL_NMR},
           c.expansionRatingStatusKey,
+        )
+      )
+    # Gaussian Expansion runs after MF Expansion and *before* Core so that Core's
+    # ApplyModelResult overwrites it whenever Core scores a note — the same
+    # ordering that prevents MF Expansion from leaving decidedBy on Core-scored notes.
+    if enabledScorers is None or Scorers.GaussianExpansionScorer in enabledScorers:
+      rules.append(
+        scoring_rules.ApplyCoverageModelResult(
+          RuleID.GAUSSIAN_EXPANSION_MODEL,
+          {RuleID.META_INITIAL_NMR},
+          c.gaussianExpansionRatingStatusKey,
+          checkFirmReject=True,
+          crnhCoverage=True,
         )
       )
     if enabledScorers is None or Scorers.MFCoreWithTopicsScorer in enabledScorers:
