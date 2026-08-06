@@ -433,6 +433,12 @@ For not-helpful notes:
 
 ## What’s New?
 
+**August 3, 2026**
+- Introduce a GaussianModel for Expansion Groups
+
+**July 28, 2026**
+- Transitioned GaussianModel from Coverage Groups to Core Groups and added an additional GaussianModel-based GroupModel to set status to “Needs More Ratings” based on ratings from contributors in the relevant modeling group.
+
 **June 30, 2026**
 - Introduced a new GroupModel architecture that uses GaussianModel-based scores to set status to "Needs More Ratings" based on the ratings from the contributors in the given GroupModel
  
